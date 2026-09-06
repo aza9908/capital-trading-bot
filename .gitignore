@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+state.json
+*.log
+backtest_results/
+.venv/
