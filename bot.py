@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import socket
 import time
 
 from capital_client import CapitalApiError, CapitalClient
@@ -24,6 +25,13 @@ from state_store import StateStore
 from strategy import SmaCrossoverStrategy
 
 CONFIRM_PHRASE = "I UNDERSTAND THE RISK"
+
+# requests' own timeout= only bounds connect/read after DNS resolves. On a flaky
+# network, socket.getaddrinfo() itself can hang far longer than that with no
+# way to bound it per-call -- this has actually happened (process alive, no
+# new log lines for hours). socket.setdefaulttimeout() is process-wide and
+# does bound the DNS phase too, so a bad lookup raises instead of hanging.
+socket.setdefaulttimeout(20)
 
 logging.basicConfig(
     level=logging.INFO,
