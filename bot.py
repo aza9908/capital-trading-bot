@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import logging
 import socket
+import threading
 import time
 
 from capital_client import CapitalApiError, CapitalClient
@@ -28,10 +29,21 @@ CONFIRM_PHRASE = "I UNDERSTAND THE RISK"
 
 # requests' own timeout= only bounds connect/read after DNS resolves. On a flaky
 # network, socket.getaddrinfo() itself can hang far longer than that with no
-# way to bound it per-call -- this has actually happened (process alive, no
-# new log lines for hours). socket.setdefaulttimeout() is process-wide and
-# does bound the DNS phase too, so a bad lookup raises instead of hanging.
+# way to bound it per-call. socket.setdefaulttimeout() is process-wide and
+# bounds the DNS phase too -- but in practice this alone still wasn't enough:
+# the process kept going silent for hours even with this set, on this specific
+# flaky network. See HARD_TIMEOUT_SECONDS below for the real fix (a hard
+# wall-clock ceiling on each check, enforced from outside the network call
+# entirely, so it doesn't matter what's actually stuck).
 socket.setdefaulttimeout(20)
+
+# Each check runs in its own thread so the main loop can enforce this ceiling
+# regardless of where a hang happens. If a check doesn't finish in time, the
+# loop abandons it and moves on -- the stuck thread is left running in the
+# background (Python threads can't be forcibly killed), but since it's a
+# daemon thread it won't block process exit, and it not blocking future
+# checks is the actual goal.
+HARD_TIMEOUT_SECONDS = 90
 
 logging.basicConfig(
     level=logging.INFO,
@@ -148,13 +160,25 @@ def main() -> None:
         cfg.max_open_positions, StateStore(),
     )
 
-    while True:
+    def run_once_safe() -> None:
         try:
             run_once(client, cfg, strategy, risk)
         except CapitalApiError as e:
             log.error("API error: %s", e)
         except Exception:
             log.exception("Unexpected error in trading loop")
+
+    while True:
+        worker = threading.Thread(target=run_once_safe, daemon=True)
+        worker.start()
+        worker.join(timeout=HARD_TIMEOUT_SECONDS)
+        if worker.is_alive():
+            log.error(
+                "Check did not finish within %ds and appears hung -- abandoning it and "
+                "continuing on schedule. (The stuck thread keeps running in the background; "
+                "this is a known limitation, not a new failure.)",
+                HARD_TIMEOUT_SECONDS,
+            )
 
         if args.once:
             break
